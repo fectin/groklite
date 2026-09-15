@@ -1,0 +1,306 @@
+#!/bin/bash  
+
+# grok2 - A Bash script to interact with the xAI Grok API
+#TODO: add a comment block back in
+
+source /etc/environment
+
+# This turns JSON into a bash array and displays it!!
+# mapfile -t messages < <(jq -c '.[]' <<< "$messagestack")
+# for message in "${messages[@]}"; do
+  # echo "Message: $message"
+# done
+
+
+########################################defaults########################################
+#Changing these is untested, but should work if you want to use different default values
+
+#topic="chat$(date +%Y%m%d)"
+#default topic set by empty call to set_topic near bottom. will default to [date].[number]
+model="grok-4.3"
+temperature=0
+maxtokens=800
+grokname="GROK"
+username="${USER^^}"
+#tiers are  "default" and "priority". priority process faster on the server.
+servicetier="default"
+
+#########################################################################################
+
+
+trap 'rm -f "$tempfile"; rm -f "$tempchat"; exit 1' SIGTSTP
+trap 'rm -f "$tempfile"; rm -f "$tempchat"' EXIT
+
+#check for home directory (weird users get an error
+if [ -z "$HOME" ]; then
+  echo "Error: HOME not set."
+  exit 1
+fi
+
+#if there isn't already a log directory, make that directory
+mkdir -p "$HOME/.log/grok/logs" "$HOME/.log/grok/conversations"
+
+
+#state flags & globals
+debug=false
+logging="full"
+persona_warning_shown=false
+messagestack=""
+logfile="$HOME/.log/grok/logs/"
+convofile="$HOME/.log/grok/conversations/"
+tempchat=$(mktemp /tmp/response.XXXXXX.json)
+
+# Show usage help and exit
+get_help() {
+  printf "grok - get answers from an AI\n\n"
+  printf "Usage: grok [-t topic [-m model] [-r temp] | -l | -h] [query]\n\n"
+  printf "Options:\n"
+  printf "  -t topic  Start conversation (interactive only, supports 'last'/'latest')\n"
+  printf "  -l        List available topics\n"
+#  printf "  -d topic  Delete topic history\n"
+#  printf "  -i        Force interactive mode\n"
+  printf "  -m model  Set model (default: %s)\n" "$model"
+  printf "  -r temp   Set temperature (default: %s)\n" "$temperature"
+  printf "  -h        Show this help\n"
+  printf "\n"
+  printf "No args: Interactive mode with auto-assigned topic\n"
+  printf "With query: Single-shot response, no history\n"
+  exit 0
+}
+
+log() {
+  [ "$debug" == true ] && printf "$@\n"
+  [ "$logging" == "full" ] && echo "$@" >> "$logfile$(date +%Y%m%d)"
+}
+
+# Delete a topic's history file and exit (will do later)
+delete_topic()  {
+#  ignore this stub for now; will finish later
+  printf "deleting topic $1\n\n"
+  exit 0
+}
+
+# List available conversation topics and exit
+list_topics() {
+  printf "listing topic\n\n"
+#  ignore this stub for now; will finish later
+#  ls -1 "$HOME/.grok_history_"*.json 2>/dev/null | sed "s|$HOME/.grok_history_\\(.*\\).json|\\1|" || echo "No conversation topics found."
+  exit 0
+}
+
+initialize_messagestack() {
+  #start building the messages json
+  #persona first
+  persona=~
+  persona="$persona""/.config/grok.persona"
+  if [ ! -r "$persona" ]; then
+    if [ "$persona_warning_shown" = false ]; then
+      log "Warning: Persona file $persona not found or unreadable, using empty system message."
+      persona_warning_shown=true
+    fi
+    messagejson=$(jo -a "$(jo role="system" content="Be yourself.")")
+  else
+    messagejson=$(jo -a "$(jo role="system" content=@"$persona")")
+  fi
+  mapfile -t messagestack < <(jq -c '.[]' <<< "$messagejson")
+  
+  #save the inital convo
+  log touch "$convofile$topic"
+  
+  return 0
+}
+
+add_message_json()  {
+  local role=$1
+  local message=""
+  [ "$username" = "$1" ] && role="user" || [ "$grokname" = "$1" ] && role="assistant"
+  log "adding message to stack"
+  #check that the role is something the API will accept
+  case "$role" in
+    user|assistant|system|tool|function) ;;   #silently allow 'tool' and 'function', because they are valid for the API
+    *) echo "Error: Invalid role '$role'. Must be 'user', 'assistant', or 'system'."; return 1;;
+  esac
+  log "role is okay"
+  message=$(jo role="$role" content="$2")
+  log "message is:\n  $message"
+  case "$role" in
+    user)
+      printf %b "\033[92m${username}:\n$2\033[0m\n\n\n\n" >> "$tempchat"
+      ;;
+    assistant)
+      printf %b "${grokname}:\n$2\n\n\n\n" >> "$tempchat"
+      ;;
+    system|tool|function)
+      #do nothing. Don't show messages from these entities.
+      ;;
+  esac
+  
+  #magic occurs here
+  messagestack+=("$message") && log "added message to stack."; log '%s\n' "${messagestack[@]}"
+  #save the topic
+  printf '%s\n' "${messagestack[@]}" > "$convofile$topic" || log "Couldn't save messagestack to $convofile$topic"
+  return 0
+}
+
+send_and_unpack()  {
+  input_json=$(jo -a "${messagestack[@]}")
+  
+  log "messagestack to add to json:\n$input_json"
+
+  question=$(jq -n --argjson input "$input_json" --arg model "$model" --arg tier "$servicetier" --arg user "$USER" '{
+    model: $model,
+    service_tier: $tier,
+    temperature: 0,
+    max_output_tokens: 1000,
+    input: $input,
+    user: $user
+  }')
+
+  log "built JSON:\n""$question"
+  
+    log "api asked"
+    tempfile=$(mktemp /tmp/response.XXXXXX.json)
+    log "tempfile= $tempfile"
+
+  log "$question" | jq .
+  response=$(curl -X POST --silent -w "%{http_code}" -o "$tempfile" \
+    https://api.x.ai/v1/responses \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $GROK_API_KEY" \
+    -m 3600 \
+    -d "$question")
+  log "curl done"  
+  log "api answered"
+  log "$response"
+  
+  if [ "$response" -ne 200 ]; then
+    echo "API error: HTTP $response"
+    cat "$tempfile" >> "$logfile"
+    [ "$mode" = "interactive" ] && return 1 || return 2
+  fi
+  log "curl error check done"
+  log "tempfile=    \n $(cat "$tempfile")"
+
+  #magically extract the output text
+  api_response=$(jq -r '.output[] | .content[]? | select(.type == "output_text") | .text' "$tempfile")
+
+
+  add_message_json "assistant" "$api_response"
+  log "api response added"
+  rm "$tempfile" && log "tempfile removed" || log "tempfile NOT removed"
+  return 0
+}
+
+display_conversation()  {
+  clear
+  printf "TOPIC: %s\n-----------------------------\n" "$topic"
+  local index
+  while IFS= read -r line; do
+    printf "%b\n" "$line"
+  done < "$tempchat"
+  printf "\n\nEnter your question or type 'exit' to exit.\n"
+}
+
+converse()  {
+  local query=$@
+  initialize_messagestack
+  if [ $# -eq 0 ]; then
+    log "interactive mode: $1"
+    while true; do
+      display_conversation
+      read -p "> " query
+      case $query in
+        exit) exit 0;;
+#        new) echo "Starting new conversation (no history used)."; continue;;
+        topic_*)
+          echo "Topic switching not implemented yet."
+          continue
+          ;;
+        "")
+          log "zero-length input"
+          continue
+          ;;
+        *)
+          #[ ${#query} -lt 0 ] && 
+          add_message_json "user" "$query"
+          send_and_unpack && log "sent and unpacked" || log "error in send_and_unpack"
+          
+          ;;
+      esac
+    done
+  else
+    log "command line mode"
+    add_message_json "user" "$query"
+    send_and_unpack && log "sent and unpacked" || log "error in send_and_unpack"
+    content=$(printf '%s\n' "${messagestack[-1]}" | jq -r '.content')
+    printf "$content\n"
+  fi
+}
+
+bad_flags_error() {
+  printf "Error 2: illegal combination of options \n (-h, -?, -l, -d, and -t are all mutually exlusive, and must be the first arguement.)\n"
+  exit 2
+}
+
+set_topic() {
+
+
+  if [ -z "$1" ]; then
+    base="chat$(date +%Y%m%d)"
+    count=$(ls -1 "$convofile${base}"* 2>/dev/null | wc -l || echo 0)
+    topic="${base}.$(printf '%03d' $((count+1)))"
+    log "Auto topic: $topic"
+    return 0
+
+
+
+#  if [ -z "$1" ]; then
+#    echo "Error: Topic cannot be empty. Set to 'chat$(date +%Y%m%d)'."
+#    return 0
+
+  elif [ "$1" = "last" ] || [ "$1" = "latest" ]; then
+    local latest_file
+    latest_file=$(ls -t "$HOME/.grok_history_"*.json 2>/dev/null | head -n 1)  # Get most recent history file
+    if [ -n "$latest_file" ]; then
+      topic=$(basename "$latest_file" .json | sed 's/^grok_history_//')  # Extract topic name
+    else
+      topic='chat$(date +%Y%m%d)'
+      echo "No previous conversation found, starting new topic: $topic"
+    fi
+    return 0
+  elif ! echo "$1" | grep -qE '^[a-zA-Z0-9_-]+$'; then
+    echo "Error: Topic '$1' contains invalid characters. Use alphanumeric, underscore, or hyphen."
+    exit 1
+  fi
+    topic="$1"  # Set valid topic
+  return 0
+}
+
+list_models() {
+  #get model list with:
+  # curl --silent -w "%{http_code}" https://api.x.ai/v1/language-models -H "Content-Type: application/json" # -H "Authorization: Bearer $GROK_API_KEY"
+
+  #...then unpack and return a list of model ids
+  return 0
+}
+
+log "==========$(date +%Y%m%d::%H:%M:%S)==========\n"
+action_flag=""
+set_topic "" #empty call will default to a date+number
+while getopts "h?lt:m:r:" opt; do    #change to "h?ld:t:m:r:" when the delete function goes in
+  case $opt in
+    h) [ -n "$action_flag" ] && bad_flags_error || action_flag="h"; get_help;;                  # Show help for -h
+    \?) [ -n "$action_flag" ] && bad_flags_error || action_flag="h"; get_help;;                 # Show help for -?
+    l) [ -n "$action_flag" ] && bad_flags_error || action_flag="l"; list_topics;;               # List topics and exit (stub)
+#    d) [ -n "$action_flag" ] && bad_flags_error || action_flag="d"; delete_topic "$OPTARG";;   # Delete topic and exit (stub)
+#    M) [ -n "$action_flag" ] && bad_flags_error || action_flag="M"; printf "$list models"; exit 0;;
+    t) [ -n "$action_flag" ] && bad_flags_error || action_flag="t"; set_topic "$OPTARG";;       # Validate and set topic
+    m) model="$OPTARG";; # Set model
+    r) temperature="$OPTARG";; # Set temperature
+
+  esac
+done
+
+      shift $((OPTIND-1)) # Remove processed flags, leaving query in $@
+      
+      converse $@
