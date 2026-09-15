@@ -1,0 +1,5 @@
+.env
+*.env
+grok.persona
+logs/
+conversations/
