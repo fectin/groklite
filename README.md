@@ -2,7 +2,7 @@
 
 Small bash CLI for the xAI Grok API (`/v1/responses`). Distinct from Grok Build.
 
-Imported from MarsTop `/usr/local/bin/grok` (2026-07-08). Live install there is still that file until you deploy from this repo.
+Imported from a legacy `/usr/local/bin/grok` (2026-07-08). That install stays in place until you deploy from this repo.
 
 ## Dependencies
 
@@ -24,7 +24,7 @@ If none of those is usable and stdin is a terminal, `grok` asks what to do with 
 
 Optional persona: `~/.config/grok.persona` (see `grok.persona.example`).
 
-The script still sources `/etc/environment` for the MarsTop install. A key found only there is used after the three places above. Do not put new keys in that file, and do not copy it into this repo.
+The script still sources `/etc/environment` for a legacy install. A key found only there is used after the three places above. Do not put new keys in that file, and do not copy it into this repo.
 
 ## Usage
 

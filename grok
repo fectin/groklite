@@ -12,7 +12,7 @@ else
   _parent_grok_api_key_set=0
 fi
 
-# MarsTop may keep a key here. Skip the file when this host has none.
+# A legacy install may keep a key here. Skip the file when this host has none.
 if [ -r /etc/environment ]; then
   source /etc/environment
 fi
@@ -29,7 +29,7 @@ fi
 
 #topic="chat$(date +%Y%m%d)"
 #default topic set by empty call to set_topic near bottom. will default to [date].[number]
-model="grok-4.3"
+model="grok-4.7"
 temperature=-1 #use -1 to not set temperature and use server default. range is 0-2
 maxtokens=800
 grokname="GROK"
@@ -63,9 +63,15 @@ logfile="$HOME/.log/grok/logs/"
 convofile="$HOME/.log/grok/conversations/"
 user_key_file="$HOME/.config/grok.env"
 common_key_file="/etc/grok/api-key"
+
+log() {
+  [ "$debug" == true ] && printf "$@\n"
+  [ "$logging" == "full" ] && echo "$@" >> "$logfile$(date +%Y%m%d)"
+}
+
 # XXXXXX must be the end of the template. BusyBox rejects a suffix after it.
 tempchat=$(mktemp "${TMPDIR:-/tmp}/grok.XXXXXX") || {
-  printf 'Could not create a temporary file.\n' >&2
+  log "Could not create a temporary file."
   exit 1
 }
 
@@ -87,11 +93,6 @@ get_help() {
   printf "No args: Interactive mode with auto-assigned topic\n"
   printf "With query: Single-shot response, no history\n"
   exit 0
-}
-
-log() {
-  [ "$debug" == true ] && printf "$@\n"
-  [ "$logging" == "full" ] && echo "$@" >> "$logfile$(date +%Y%m%d)"
 }
 
 # xAI keys start with xai-. Length is not fixed.
@@ -119,7 +120,7 @@ key_sane() {
 }
 
 reject_stored_key() {
-  printf 'Ignoring API key from %s: it should start with xai- and contain no spaces.\n' "$1" >&2
+  log "Ignoring API key from $1: it should start with xai- and contain no spaces."
 }
 
 load_user_key() {
@@ -172,7 +173,7 @@ write_user_key() {
   fi
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$user_key_file" || { rm -f "$tmp"; return 1; }
-  printf 'Saved key for your user in %s\n' "$user_key_file" >&2
+  log "Saved key for your user in $user_key_file"
 }
 
 write_machine_key() {
@@ -185,35 +186,35 @@ write_machine_key() {
   chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
   if ! run_as_root mkdir -p -m 755 /etc/grok; then
     rm -f "$tmp"
-    printf 'Could not create /etc/grok.\n' >&2
+    log "Could not create /etc/grok."
     return 1
   fi
   if ! getent group grok >/dev/null; then
     if ! run_as_root groupadd --system grok; then
       rm -f "$tmp"
-      printf 'Could not create group grok.\n' >&2
+      log "Could not create group grok."
       return 1
     fi
   fi
   if ! run_as_root install -m 640 -o root -g grok "$tmp" "$common_key_file"; then
     rm -f "$tmp"
-    printf 'Could not install %s.\n' "$common_key_file" >&2
+    log "Could not install $common_key_file."
     return 1
   fi
   rm -f "$tmp"
   target_user=${USER:-$(id -un)}
   if ! id -nG "$target_user" | tr ' ' '\n' | grep -qx grok; then
     if ! run_as_root usermod -aG grok "$target_user"; then
-      printf 'Saved shared key in %s, but could not add %s to group grok.\n' "$common_key_file" "$target_user" >&2
-      printf 'This run will use the key you just entered.\n' >&2
+      log "Saved shared key in $common_key_file, but could not add $target_user to group grok."
+      log "This run will use the key you just entered."
       return 0
     fi
   fi
   if [ -r "$common_key_file" ]; then
-    printf 'Saved shared key in %s (readable by group grok).\n' "$common_key_file" >&2
+    log "Saved shared key in $common_key_file (readable by group grok)."
   else
-    printf 'Saved shared key in %s.\n' "$common_key_file" >&2
-    printf 'This session cannot read it yet. Log in again so membership in group grok applies. This run will use the key you just entered.\n' >&2
+    log "Saved shared key in $common_key_file."
+    log "This session cannot read it yet. Log in again so membership in group grok applies. This run will use the key you just entered."
   fi
 }
 
@@ -221,10 +222,10 @@ prompt_for_key() {
   local choice key
   if [ ! -t 0 ]; then
     if [ "$force_key_menu" = true ]; then
-      printf 'Cannot open the API key menu: not a terminal.\n' >&2
+      log "Cannot open the API key menu: not a terminal."
     else
-      printf 'No API key found.\n' >&2
-      printf 'Set GROK_API_KEY, or store it in %s, or in %s.\n' "$user_key_file" "$common_key_file" >&2
+      log "No API key found."
+      log "Set GROK_API_KEY, or store it in $user_key_file, or in $common_key_file."
     fi
     return 1
   fi
@@ -263,7 +264,7 @@ prompt_for_key() {
         write_machine_key "$key" || continue
         ;;
       n|N|now)
-        printf 'Using the key for this run only.\n' >&2
+        log "Using the key for this run only."
         ;;
     esac
     GROK_API_KEY=$key
@@ -306,7 +307,7 @@ ensure_api_key() {
     fi
     reject_stored_key "$common_key_file"
   fi
-  # Legacy MarsTop path: source /etc/environment may have set this.
+  # Legacy path: source /etc/environment may have set this.
   if [ "$_parent_grok_api_key_set" -eq 0 ] && [ -n "${GROK_API_KEY:-}" ]; then
     candidate=$(normalize_key "$GROK_API_KEY")
     if key_sane "$candidate"; then
@@ -405,7 +406,7 @@ send_and_unpack()  {
   
     log "api asked"
     tempfile=$(mktemp "${TMPDIR:-/tmp}/grok.XXXXXX") || {
-      printf 'Could not create a temporary file.\n' >&2
+      log "Could not create a temporary file."
       return 2
     }
     log "tempfile= $tempfile"
@@ -441,7 +442,7 @@ send_and_unpack()  {
 
 display_conversation()  {
   if [ ! -r "$tempchat" ]; then
-    printf 'No conversation file to display.\n' >&2
+    log "No conversation file to display."
     return 1
   fi
   clear
