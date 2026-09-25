@@ -1,6 +1,6 @@
 #!/bin/bash  
 
-# grok2 - A Bash script to interact with the xAI Grok API
+# grok - A Bash script to interact with the xAI Grok API
 #TODO: add a comment block back in
 
 # Parent export wins over key files. source may overwrite GROK_API_KEY.
@@ -58,7 +58,7 @@ debug=false
 force_key_menu=false
 logging="full"
 persona_warning_shown=false
-messagestack=""
+messagestack=()
 logfile="$HOME/.log/grok/logs/"
 convofile="$HOME/.log/grok/conversations/"
 user_key_file="$HOME/.config/grok.env"
@@ -336,24 +336,25 @@ list_topics() {
 }
 
 initialize_messagestack() {
-  #start building the messages json
-  #persona first
-  persona=~
-  persona="$persona""/.config/grok.persona"
+  # An empty string in the stack becomes JSON null, which the API rejects.
+  local sys
+  persona="$HOME/.config/grok.persona"
   if [ ! -r "$persona" ]; then
     if [ "$persona_warning_shown" = false ]; then
       log "Warning: Persona file $persona not found or unreadable, using empty system message."
       persona_warning_shown=true
     fi
-    messagejson=$(jo -a "$(jo role="system" content="Be yourself.")")
+    sys=$(jo role="system" content="Be yourself.")
   else
-    messagejson=$(jo -a "$(jo role="system" content=@"$persona")")
+    sys=$(jo role="system" content=@"$persona")
   fi
-  mapfile -t messagestack < <(jq -c '.[]' <<< "$messagejson")
-  
-  #save the inital convo
+  messagestack=()
+  if [ -n "$sys" ]; then
+    messagestack+=("$sys")
+  fi
+
   log touch "$convofile$topic"
-  
+
   return 0
 }
 
@@ -390,7 +391,16 @@ add_message_json()  {
 }
 
 send_and_unpack()  {
-  input_json=$(jo -a "${messagestack[@]}")
+  local item
+  local -a items=()
+  for item in "${messagestack[@]}"; do
+    [ -n "$item" ] && items+=("$item")
+  done
+  if [ "${#items[@]}" -eq 0 ]; then
+    log "No messages to send."
+    return 2
+  fi
+  input_json=$(jo -a "${items[@]}")
   
   log "messagestack to add to json:\n$input_json"
 
