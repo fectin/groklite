@@ -25,7 +25,7 @@ MarsTop currently injects the key via `/etc/environment` and `source /etc/enviro
     grok 'what time is it on Mars?'    # one-shot
     grok                               # interactive, auto topic
     grok -t mytopic                    # interactive, named topic
-    grok -m grok-4.3 -r 0 '...'        # model / temperature flags exist; request body still hardcodes some values
+    grok -m grok-4.3 -r 0 '...'        # -r omitted (or -1): no temperature field, server default
 
 Conversations and logs: `~/.log/grok/`.
 

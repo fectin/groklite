@@ -18,7 +18,7 @@ source /etc/environment
 #topic="chat$(date +%Y%m%d)"
 #default topic set by empty call to set_topic near bottom. will default to [date].[number]
 model="grok-4.3"
-temperature=0
+temperature=-1 #use -1 to not set temperature and use server default. range is 0-2
 maxtokens=800
 grokname="GROK"
 username="${USER^^}"
@@ -31,7 +31,7 @@ servicetier="default"
 trap 'rm -f "$tempfile"; rm -f "$tempchat"; exit 1' SIGTSTP
 trap 'rm -f "$tempfile"; rm -f "$tempchat"' EXIT
 
-#check for home directory (weird users get an error
+#check for home directory (weird users get an error)
 if [ -z "$HOME" ]; then
   echo "Error: HOME not set."
   exit 1
@@ -60,7 +60,7 @@ get_help() {
 #  printf "  -d topic  Delete topic history\n"
 #  printf "  -i        Force interactive mode\n"
   printf "  -m model  Set model (default: %s)\n" "$model"
-  printf "  -r temp   Set temperature (default: %s)\n" "$temperature"
+  printf "  -r temp   Set temperature 0-2 (default: %s, omit field / server default)\n" "$temperature"
   printf "  -h        Show this help\n"
   printf "\n"
   printf "No args: Interactive mode with auto-assigned topic\n"
@@ -147,14 +147,13 @@ send_and_unpack()  {
   
   log "messagestack to add to json:\n$input_json"
 
-  question=$(jq -n --argjson input "$input_json" --arg model "$model" --arg tier "$servicetier" --arg user "$USER" '{
+  question=$(jq -n --argjson input "$input_json" --arg model "$model" --arg tier "$servicetier" --arg user "$USER" --argjson temperature "$temperature" '{
     model: $model,
     service_tier: $tier,
-    temperature: 0,
     max_output_tokens: 1000,
     input: $input,
     user: $user
-  }')
+  } + (if $temperature == -1 then {} else {temperature: $temperature} end)')
 
   log "built JSON:\n""$question"
   
@@ -296,7 +295,12 @@ while getopts "h?lt:m:r:" opt; do    #change to "h?ld:t:m:r:" when the delete fu
 #    M) [ -n "$action_flag" ] && bad_flags_error || action_flag="M"; printf "$list models"; exit 0;;
     t) [ -n "$action_flag" ] && bad_flags_error || action_flag="t"; set_topic "$OPTARG";;       # Validate and set topic
     m) model="$OPTARG";; # Set model
-    r) temperature="$OPTARG";; # Set temperature
+    r) temperature="$OPTARG"
+       # 0-2 kept; anything else (including -1) omits the field / server default
+       if ! jq -ne --argjson t "$temperature" '$t >= 0 and $t <= 2' >/dev/null 2>&1; then
+         temperature=-1
+       fi
+       ;;
 
   esac
 done
