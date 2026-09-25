@@ -12,7 +12,10 @@ else
   _parent_grok_api_key_set=0
 fi
 
-source /etc/environment
+# MarsTop may keep a key here. Skip the file when this host has none.
+if [ -r /etc/environment ]; then
+  source /etc/environment
+fi
 
 # This turns JSON into a bash array and displays it!!
 # mapfile -t messages < <(jq -c '.[]' <<< "$messagestack")
@@ -60,7 +63,11 @@ logfile="$HOME/.log/grok/logs/"
 convofile="$HOME/.log/grok/conversations/"
 user_key_file="$HOME/.config/grok.env"
 common_key_file="/etc/grok/api-key"
-tempchat=$(mktemp /tmp/response.XXXXXX.json)
+# XXXXXX must be the end of the template. BusyBox rejects a suffix after it.
+tempchat=$(mktemp "${TMPDIR:-/tmp}/grok.XXXXXX") || {
+  printf 'Could not create a temporary file.\n' >&2
+  exit 1
+}
 
 # Show usage help and exit
 get_help() {
@@ -397,7 +404,10 @@ send_and_unpack()  {
   log "built JSON:\n""$question"
   
     log "api asked"
-    tempfile=$(mktemp /tmp/response.XXXXXX.json)
+    tempfile=$(mktemp "${TMPDIR:-/tmp}/grok.XXXXXX") || {
+      printf 'Could not create a temporary file.\n' >&2
+      return 2
+    }
     log "tempfile= $tempfile"
 
   log "$question" | jq .
@@ -430,6 +440,10 @@ send_and_unpack()  {
 }
 
 display_conversation()  {
+  if [ ! -r "$tempchat" ]; then
+    printf 'No conversation file to display.\n' >&2
+    return 1
+  fi
   clear
   printf "TOPIC: %s\n-----------------------------\n" "$topic"
   local index
