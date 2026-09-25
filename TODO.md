@@ -58,7 +58,7 @@ In-session `topic_*` switching only after load works, and without destroying `$t
 Not this framework.
 
 - Put `$temperature` / `$maxtokens` into the `jq` object (`-r` is unused). True, low value.
-- Drop `source /etc/environment` and fail if `GROK_API_KEY` (and maybe `jo` / `jq` / `curl`) is missing. Portability for the repo, not required for the MarsTop install.
+- `source /etc/environment` is still there for MarsTop. Key lookup does not install a key there. Order: parent `GROK_API_KEY`, `~/.config/grok.env`, `/etc/grok/api-key`, then a key that source happened to set. Removing the source line is still optional portability work. Failing when `jo` / `jq` / `curl` is missing is still open.
 - `list_models` (`GET /v1/language-models`). Different feature.
 - Message stack as a bash array of `jo` JSON strings. Fine for short terminal lines; fragile for quotes, newlines, empty API text, or a huge reply. That is a ceiling, not a task. Do not start a rewrite. Topic resume (B) should treat the file as NDJSON via `jq`, not `printf '%s\n' "${messagestack[@]}"` as gospel.
 - Startup assigning a topic and logging a header before `-h` / `-l`. Nit; fold into help/getopts if you touch that path.

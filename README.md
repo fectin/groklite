@@ -14,14 +14,22 @@ Ubuntu:
 
 ## Config (not in git)
 
-    export GROK_API_KEY='...'          # required
-    # optional: ~/.config/grok.persona  # system prompt; see grok.persona.example
+The script looks for an API key in this order:
 
-MarsTop currently injects the key via `/etc/environment` and `source /etc/environment` in the script. Do not copy that file here.
+1. `GROK_API_KEY` already set in the environment that started `grok`
+2. `~/.config/grok.env` (mode `600`), one line: `GROK_API_KEY=xai-...`
+3. `/etc/grok/api-key` (mode `640`, `root:grok`), the raw key on one line
+
+If none of those is usable and stdin is a terminal, `grok` asks what to do with a key: save it for your user, save it for this machine (group `grok`, via sudo), or use it for this run only. `grok -k` opens that menu even when a key is already set. A key must start with `xai-` and contain no spaces. Length is not fixed.
+
+Optional persona: `~/.config/grok.persona` (see `grok.persona.example`).
+
+The script still sources `/etc/environment` for the MarsTop install. A key found only there is used after the three places above. Do not put new keys in that file, and do not copy it into this repo.
 
 ## Usage
 
     grok -h
+    grok -k                            # API key menu, then continue
     grok 'what time is it on Mars?'    # one-shot
     grok                               # interactive, auto topic
     grok -t mytopic                    # interactive, named topic

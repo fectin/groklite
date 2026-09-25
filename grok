@@ -3,6 +3,15 @@
 # grok2 - A Bash script to interact with the xAI Grok API
 #TODO: add a comment block back in
 
+# Parent export wins over key files. source may overwrite GROK_API_KEY.
+if [ -n "${GROK_API_KEY:-}" ]; then
+  _parent_grok_api_key=$GROK_API_KEY
+  _parent_grok_api_key_set=1
+else
+  _parent_grok_api_key=
+  _parent_grok_api_key_set=0
+fi
+
 source /etc/environment
 
 # This turns JSON into a bash array and displays it!!
@@ -43,18 +52,22 @@ mkdir -p "$HOME/.log/grok/logs" "$HOME/.log/grok/conversations"
 
 #state flags & globals
 debug=false
+force_key_menu=false
 logging="full"
 persona_warning_shown=false
 messagestack=""
 logfile="$HOME/.log/grok/logs/"
 convofile="$HOME/.log/grok/conversations/"
+user_key_file="$HOME/.config/grok.env"
+common_key_file="/etc/grok/api-key"
 tempchat=$(mktemp /tmp/response.XXXXXX.json)
 
 # Show usage help and exit
 get_help() {
   printf "grok - get answers from an AI\n\n"
-  printf "Usage: grok [-t topic [-m model] [-r temp] | -l | -h] [query]\n\n"
+  printf "Usage: grok [-k] [-t topic [-m model] [-r temp] | -l | -h] [query]\n\n"
   printf "Options:\n"
+  printf "  -k        Open the API key menu, even if a key is already set\n"
   printf "  -t topic  Start conversation (interactive only, supports 'last'/'latest')\n"
   printf "  -l        List available topics\n"
 #  printf "  -d topic  Delete topic history\n"
@@ -63,6 +76,7 @@ get_help() {
   printf "  -r temp   Set temperature 0-2 (default: %s, omit field / server default)\n" "$temperature"
   printf "  -h        Show this help\n"
   printf "\n"
+  printf "API key: environment, then ~/.config/grok.env, then /etc/grok/api-key\n"
   printf "No args: Interactive mode with auto-assigned topic\n"
   printf "With query: Single-shot response, no history\n"
   exit 0
@@ -71,6 +85,231 @@ get_help() {
 log() {
   [ "$debug" == true ] && printf "$@\n"
   [ "$logging" == "full" ] && echo "$@" >> "$logfile$(date +%Y%m%d)"
+}
+
+# xAI keys start with xai-. Length is not fixed.
+normalize_key() {
+  local k=$1
+  k=${k%$'\r'}
+  k=${k#"${k%%[![:space:]]*}"}
+  k=${k%"${k##*[![:space:]]}"}
+  case $k in
+    \"*\") k=${k#\"}; k=${k%\"} ;;
+    \'*\') k=${k#\'}; k=${k%\'} ;;
+  esac
+  k=${k#"${k%%[![:space:]]*}"}
+  k=${k%"${k##*[![:space:]]}"}
+  printf '%s' "$k"
+}
+
+key_sane() {
+  local k=$1 body n
+  n=${#k}
+  [ "$n" -ge 8 ] && [ "$n" -le 500 ] || return 1
+  body=${k#xai-}
+  [ "$body" != "$k" ] && [ -n "$body" ] || return 1
+  [[ $body =~ ^[[:graph:]]+$ ]]
+}
+
+reject_stored_key() {
+  printf 'Ignoring API key from %s: it should start with xai- and contain no spaces.\n' "$1" >&2
+}
+
+load_user_key() {
+  local line val
+  _loaded_key=
+  [ -r "$user_key_file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      ''|\#*) continue ;;
+    esac
+    case $line in
+      export\ *) line=${line#export } ;;
+    esac
+    case $line in
+      GROK_API_KEY=*)
+        val=$(normalize_key "${line#GROK_API_KEY=}")
+        _loaded_key=$val
+        return 0
+        ;;
+    esac
+  done < "$user_key_file"
+  return 1
+}
+
+load_common_key() {
+  local line
+  _loaded_key=
+  [ -r "$common_key_file" ] || return 1
+  IFS= read -r line < "$common_key_file" || return 1
+  _loaded_key=$(normalize_key "$line")
+  return 0
+}
+
+run_as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+write_user_key() {
+  local key=$1 dir tmp
+  dir=$HOME/.config
+  mkdir -p "$dir" || return 1
+  tmp=$(umask 077; mktemp "$dir/grok.env.XXXXXX") || return 1
+  if ! printf 'GROK_API_KEY=%s\n' "$key" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$user_key_file" || { rm -f "$tmp"; return 1; }
+  printf 'Saved key for your user in %s\n' "$user_key_file" >&2
+}
+
+write_machine_key() {
+  local key=$1 tmp target_user
+  tmp=$(umask 077; mktemp) || return 1
+  if ! printf '%s\n' "$key" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! run_as_root mkdir -p -m 755 /etc/grok; then
+    rm -f "$tmp"
+    printf 'Could not create /etc/grok.\n' >&2
+    return 1
+  fi
+  if ! getent group grok >/dev/null; then
+    if ! run_as_root groupadd --system grok; then
+      rm -f "$tmp"
+      printf 'Could not create group grok.\n' >&2
+      return 1
+    fi
+  fi
+  if ! run_as_root install -m 640 -o root -g grok "$tmp" "$common_key_file"; then
+    rm -f "$tmp"
+    printf 'Could not install %s.\n' "$common_key_file" >&2
+    return 1
+  fi
+  rm -f "$tmp"
+  target_user=${USER:-$(id -un)}
+  if ! id -nG "$target_user" | tr ' ' '\n' | grep -qx grok; then
+    if ! run_as_root usermod -aG grok "$target_user"; then
+      printf 'Saved shared key in %s, but could not add %s to group grok.\n' "$common_key_file" "$target_user" >&2
+      printf 'This run will use the key you just entered.\n' >&2
+      return 0
+    fi
+  fi
+  if [ -r "$common_key_file" ]; then
+    printf 'Saved shared key in %s (readable by group grok).\n' "$common_key_file" >&2
+  else
+    printf 'Saved shared key in %s.\n' "$common_key_file" >&2
+    printf 'This session cannot read it yet. Log in again so membership in group grok applies. This run will use the key you just entered.\n' >&2
+  fi
+}
+
+prompt_for_key() {
+  local choice key
+  if [ ! -t 0 ]; then
+    if [ "$force_key_menu" = true ]; then
+      printf 'Cannot open the API key menu: not a terminal.\n' >&2
+    else
+      printf 'No API key found.\n' >&2
+      printf 'Set GROK_API_KEY, or store it in %s, or in %s.\n' "$user_key_file" "$common_key_file" >&2
+    fi
+    return 1
+  fi
+  while true; do
+    if [ "$force_key_menu" = true ]; then
+      printf 'API key:\n' >&2
+    else
+      printf 'No API key found.\n' >&2
+    fi
+    printf '  u  save for just you      %s\n' "$user_key_file" >&2
+    printf '  m  save for this machine  %s (group grok, uses sudo)\n' "$common_key_file" >&2
+    printf '  n  this run only          do not save it\n' >&2
+    printf '  q  quit\n' >&2
+    printf 'Choice: ' >&2
+    IFS= read -r choice < /dev/tty || return 1
+    case $choice in
+      u|U|user) ;;
+      m|M|machine) ;;
+      n|N|now) ;;
+      q|Q|quit|'') return 1 ;;
+      *) printf 'Enter u, m, n, or q.\n' >&2; continue ;;
+    esac
+    printf 'Paste the key (input hidden): ' >&2
+    IFS= read -rs key < /dev/tty || return 1
+    printf '\n' >&2
+    key=$(normalize_key "$key")
+    if ! key_sane "$key"; then
+      printf 'That key should start with xai- and be one token with no spaces.\n' >&2
+      continue
+    fi
+    case $choice in
+      u|U|user)
+        write_user_key "$key" || continue
+        ;;
+      m|M|machine)
+        write_machine_key "$key" || continue
+        ;;
+      n|N|now)
+        printf 'Using the key for this run only.\n' >&2
+        ;;
+    esac
+    GROK_API_KEY=$key
+    unset _parent_grok_api_key
+    return 0
+  done
+}
+
+accept_key() {
+  GROK_API_KEY=$1
+  unset _parent_grok_api_key _loaded_key
+  return 0
+}
+
+ensure_api_key() {
+  local candidate
+  if [ "$force_key_menu" = true ]; then
+    prompt_for_key
+    return
+  fi
+  if [ "$_parent_grok_api_key_set" -eq 1 ]; then
+    candidate=$(normalize_key "$_parent_grok_api_key")
+    if key_sane "$candidate"; then
+      accept_key "$candidate"
+      return 0
+    fi
+    reject_stored_key 'the environment'
+  fi
+  if load_user_key; then
+    if key_sane "$_loaded_key"; then
+      accept_key "$_loaded_key"
+      return 0
+    fi
+    reject_stored_key "$user_key_file"
+  fi
+  if load_common_key; then
+    if key_sane "$_loaded_key"; then
+      accept_key "$_loaded_key"
+      return 0
+    fi
+    reject_stored_key "$common_key_file"
+  fi
+  # Legacy MarsTop path: source /etc/environment may have set this.
+  if [ "$_parent_grok_api_key_set" -eq 0 ] && [ -n "${GROK_API_KEY:-}" ]; then
+    candidate=$(normalize_key "$GROK_API_KEY")
+    if key_sane "$candidate"; then
+      accept_key "$candidate"
+      return 0
+    fi
+    reject_stored_key '/etc/environment'
+  fi
+  unset _loaded_key
+  prompt_for_key
 }
 
 # Delete a topic's history file and exit (will do later)
@@ -286,10 +525,11 @@ list_models() {
 log "==========$(date +%Y%m%d::%H:%M:%S)==========\n"
 action_flag=""
 set_topic "" #empty call will default to a date+number
-while getopts "h?lt:m:r:" opt; do    #change to "h?ld:t:m:r:" when the delete function goes in
+while getopts "h?klt:m:r:" opt; do    #change to "h?kld:t:m:r:" when the delete function goes in
   case $opt in
     h) [ -n "$action_flag" ] && bad_flags_error || action_flag="h"; get_help;;                  # Show help for -h
     \?) [ -n "$action_flag" ] && bad_flags_error || action_flag="h"; get_help;;                 # Show help for -?
+    k) force_key_menu=true;;                                                                    # API key menu, then continue
     l) [ -n "$action_flag" ] && bad_flags_error || action_flag="l"; list_topics;;               # List topics and exit (stub)
 #    d) [ -n "$action_flag" ] && bad_flags_error || action_flag="d"; delete_topic "$OPTARG";;   # Delete topic and exit (stub)
 #    M) [ -n "$action_flag" ] && bad_flags_error || action_flag="M"; printf "$list models"; exit 0;;
@@ -306,5 +546,6 @@ while getopts "h?lt:m:r:" opt; do    #change to "h?ld:t:m:r:" when the delete fu
 done
 
       shift $((OPTIND-1)) # Remove processed flags, leaving query in $@
-      
+
+      ensure_api_key || exit 1
       converse $@
